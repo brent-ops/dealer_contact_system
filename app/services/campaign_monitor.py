@@ -16,6 +16,14 @@ logger = get_logger(__name__)
 
 
 @dataclass(frozen=True)
+class SegmentDefinition:
+    """Definition for one Campaign Monitor segment and its rules."""
+
+    title: str
+    rules: tuple[tuple[str, str], ...]
+
+
+@dataclass(frozen=True)
 class CampaignMonitorHealthResult:
     """Simple result from one Campaign Monitor health check."""
 
@@ -58,9 +66,44 @@ class CampaignMonitorService:
         "Dealer Name": "Text",
         "City": "Text",
         "State": "Text",
+        "Phone": "Text",
+        "Country": "Text",
+        "Market": "Text",
+        "Audience Type": "Text",
+        "Source List": "Text",
         "Role Family": "Text",
         "Dealer Classification": "Text",
     }
+    STATIC_SEGMENT_DEFINITIONS = (
+        SegmentDefinition(
+            title="Automation Canada Subscribers",
+            rules=(("Country", "Canada"),),
+        ),
+        SegmentDefinition(
+            title="Automation United States Subscribers",
+            rules=(("Country", "United States"),),
+        ),
+        SegmentDefinition(
+            title="Automation Canada Current Clients",
+            rules=(("Country", "Canada"), ("Audience Type", "current_client")),
+        ),
+        SegmentDefinition(
+            title="Automation United States Current Clients",
+            rules=(("Country", "United States"), ("Audience Type", "current_client")),
+        ),
+        SegmentDefinition(
+            title="Automation Canada Prospects",
+            rules=(("Country", "Canada"), ("Audience Type", "prospect")),
+        ),
+        SegmentDefinition(
+            title="Automation United States Prospects",
+            rules=(("Country", "United States"), ("Audience Type", "prospect")),
+        ),
+    )
+    LEGACY_SEGMENT_TITLES = (
+        "Automation Current Clients",
+        "Automation Prospects",
+    )
 
     def __init__(self, repository: BigQueryRepository, settings: Settings) -> None:
         self.repository = repository
@@ -172,10 +215,10 @@ class CampaignMonitorService:
                 status="success",
                 detail=(
                     f"Would create master list '{self.settings.campaign_monitor_master_list_name}' "
-                    f"and {len(brands)} OEM segments."
+                    f"and {len(brands) + len(self.STATIC_SEGMENT_DEFINITIONS)} total segments."
                 ),
                 list_id=None,
-                created_segments=len(brands),
+                created_segments=len(brands) + len(self.STATIC_SEGMENT_DEFINITIONS),
                 existing_segments=0,
             )
 
@@ -190,12 +233,17 @@ class CampaignMonitorService:
 
         field_map = self._ensure_custom_fields(list_id, dry_run=dry_run)
         existing_segments = self._api_get(f"/lists/{list_id}/segments.json") if not dry_run else []
+        if not dry_run:
+            self._remove_legacy_segments(list_id=list_id, segments=existing_segments)
+            existing_segments = self._api_get(f"/lists/{list_id}/segments.json")
         existing_names = {str(item.get("Title", "")).strip() for item in existing_segments}
         created_segments = 0
 
-        oem_key = field_map.get("OEM", "[OEM]")
-        for brand in brands:
-            segment_name = f"Automation {brand} Subscribers"
+        for definition in self._build_segment_definitions(
+            brands=brands,
+            field_map=field_map,
+        ):
+            segment_name = definition.title
             if segment_name in existing_names:
                 continue
             created_segments += 1
@@ -207,9 +255,10 @@ class CampaignMonitorService:
                     {
                         "Rules": [
                             {
-                                "RuleType": oem_key,
-                                "Clause": f"EQUALS {brand}",
+                                "RuleType": rule_type,
+                                "Clause": clause,
                             }
+                            for rule_type, clause in definition.rules
                         ]
                     }
                 ],
@@ -244,7 +293,7 @@ class CampaignMonitorService:
         dry_run: bool = False,
         limit: int = 100,
     ) -> CampaignMonitorSyncResult:
-        """Sync a deduped batch of marketing-ready subscribers into the master list."""
+        """Sync a deduped batch of activation-ready subscribers into the master list."""
 
         if not self.settings.campaign_monitor_api_key or not self.settings.campaign_monitor_client_id:
             return CampaignMonitorSyncResult(
@@ -303,6 +352,11 @@ class CampaignMonitorService:
                         {"Key": field_map["Dealer Name"], "Value": subscriber["dealer_name"]},
                         {"Key": field_map["City"], "Value": subscriber["city"]},
                         {"Key": field_map["State"], "Value": subscriber["state"]},
+                        {"Key": field_map["Phone"], "Value": subscriber["phone_number"]},
+                        {"Key": field_map["Country"], "Value": subscriber["country"]},
+                        {"Key": field_map["Market"], "Value": subscriber["market"]},
+                        {"Key": field_map["Audience Type"], "Value": subscriber["audience_type"]},
+                        {"Key": field_map["Source List"], "Value": subscriber["source_list"]},
                         {"Key": field_map["Role Family"], "Value": subscriber["role_family"]},
                         {"Key": field_map["Dealer Classification"], "Value": subscriber["dealer_classification"]},
                     ],
@@ -324,11 +378,25 @@ class CampaignMonitorService:
         failure_count = len(failure_details)
         new_subscribers = int(result.get("TotalNewSubscribers", 0)) if isinstance(result, dict) else 0
         existing_subscribers = int(result.get("TotalExistingSubscribers", 0)) if isinstance(result, dict) else 0
+        failed_emails = {
+            str(item.get("EmailAddress") or item.get("email") or "").strip().lower()
+            for item in failure_details
+            if isinstance(item, dict)
+        }
+        successful_emails = [
+            subscriber["email"]
+            for subscriber in subscribers
+            if subscriber["email"].strip().lower() not in failed_emails
+        ]
 
         self._record_subscriber_sync_status(
             list_id=structure.list_id,
             submitted_count=len(subscribers),
             failed_count=failure_count,
+        )
+        self._record_individual_subscriber_sync_status(
+            list_id=structure.list_id,
+            emails=successful_emails,
         )
 
         return CampaignMonitorSyncResult(
@@ -507,50 +575,86 @@ class CampaignMonitorService:
         self.repository.execute_statement(query)
 
     def _load_sync_candidates(self, limit: int) -> list[dict[str, str]]:
-        """Load deduped, marketing-ready subscribers from BigQuery."""
+        """Load deduped subscribers that are unsynced or changed since last Campaign Monitor sync."""
 
         query = f"""
-        WITH ranked_contacts AS (
+        WITH deduped AS (
           SELECT
-            pc.prospect_contact_id,
-            pc.email,
-            COALESCE(NULLIF(TRIM(pc.full_name), ''), CONCAT(COALESCE(pc.first_name, ''), ' ', COALESCE(pc.last_name, ''))) AS full_name,
-            COALESCE(NULLIF(TRIM(pc.role_family), ''), 'unclassified') AS role_family,
-            da.account_name AS dealer_name,
-            COALESCE(da.inferred_brand, 'Unknown') AS oem,
-            COALESCE(da.account_city, '') AS city,
-            COALESCE(da.account_state, '') AS state,
-            COALESCE(da.dealer_classification, '') AS dealer_classification,
-            COALESCE(pc.confidence_score, 0) AS confidence_score,
+            email,
+            full_name,
+            role_family,
+            dealer_name,
+            oem,
+            city,
+            state,
+            phone_number,
+            country,
+            market,
+            audience_type,
+            source_list,
+            dealer_classification,
+            updated_at,
             ROW_NUMBER() OVER (
-              PARTITION BY LOWER(pc.email)
-              ORDER BY COALESCE(pc.confidence_score, 0) DESC, pc.last_seen_at DESC NULLS LAST, pc.created_at DESC
+              PARTITION BY LOWER(email)
+              ORDER BY
+                marketing_ready_flag DESC,
+                current_client_override_flag DESC,
+                account_confidence_score DESC,
+                contact_confidence_score DESC,
+                updated_at DESC
             ) AS row_number
-          FROM `{self.settings.prospect_contacts_table_fqn}` AS pc
-          JOIN `{self.settings.account_relationships_table_fqn}` AS ar
-            ON ar.prospect_contact_id = pc.prospect_contact_id
-          JOIN `{self.settings.dealer_accounts_table_fqn}` AS da
-            ON da.dealer_account_id = ar.dealer_account_id
-          WHERE da.dealer_classification IN ('dealer', 'dealer_group')
-            AND da.inferred_brand IS NOT NULL
-            AND TRIM(da.inferred_brand) != ''
-            AND pc.email IS NOT NULL
-            AND TRIM(pc.email) != ''
-            AND COALESCE(pc.is_personal_email, FALSE) = FALSE
-            AND LOWER(COALESCE(pc.contact_status, 'active')) NOT IN ('inactive', 'suppressed', 'invalid')
+          FROM `{self.settings.prospect_leads_table_fqn}`
+          WHERE activation_status = 'activation_ready'
+            AND COALESCE(prospecting_allowed_flag, TRUE)
+            AND email IS NOT NULL
+            AND TRIM(email) != ''
+        ),
+        ranked AS (
+          SELECT
+            email,
+            TRIM(full_name) AS full_name,
+            role_family,
+            dealer_name,
+            oem,
+            city,
+            state,
+            phone_number,
+            country,
+            market,
+            audience_type,
+            source_list,
+            dealer_classification,
+            updated_at
+          FROM deduped
+          WHERE row_number = 1
         )
         SELECT
-          email,
-          TRIM(full_name) AS full_name,
-          role_family,
-          dealer_name,
-          oem,
-          city,
-          state,
-          dealer_classification
-        FROM ranked_contacts
-        WHERE row_number = 1
-        ORDER BY oem ASC, dealer_name ASC, email ASC
+          ranked.email,
+          ranked.full_name,
+          ranked.role_family,
+          ranked.dealer_name,
+          ranked.oem,
+          ranked.city,
+          ranked.state,
+          ranked.phone_number,
+          ranked.country,
+          ranked.market,
+          ranked.audience_type,
+          ranked.source_list,
+          ranked.dealer_classification
+        FROM ranked
+        LEFT JOIN `{self.settings.sync_targets_table_fqn}` AS sync_state
+          ON sync_state.target_system = 'campaign_monitor'
+         AND sync_state.target_entity_type = 'subscriber'
+         AND LOWER(sync_state.target_entity_id) = LOWER(ranked.email)
+        WHERE sync_state.last_synced_at IS NULL
+           OR ranked.updated_at > sync_state.last_synced_at
+        ORDER BY
+          sync_state.last_synced_at ASC NULLS FIRST,
+          ranked.updated_at DESC,
+          ranked.oem ASC,
+          ranked.dealer_name ASC,
+          ranked.email ASC
         LIMIT {int(limit)}
         """
         rows = self.repository.fetch_all(query)
@@ -563,11 +667,89 @@ class CampaignMonitorService:
                 "oem": str(row.get("oem", "") or "").strip() or "Unknown",
                 "city": str(row.get("city", "") or "").strip(),
                 "state": str(row.get("state", "") or "").strip(),
+                "phone_number": str(row.get("phone_number", "") or "").strip(),
+                "country": str(row.get("country", "") or "").strip() or "United States",
+                "market": str(row.get("market", "") or "").strip() or "US",
+                "audience_type": str(row.get("audience_type", "") or "").strip() or "prospect",
+                "source_list": str(row.get("source_list", "") or "").strip() or "contact_master",
                 "dealer_classification": str(row.get("dealer_classification", "") or "").strip(),
             }
             for row in rows
             if row.get("email")
         ]
+
+    def _record_individual_subscriber_sync_status(self, list_id: str, emails: list[str]) -> None:
+        """Persist per-email Campaign Monitor sync progress so later runs advance through the list."""
+
+        cleaned_emails = sorted({str(email).strip().lower() for email in emails if str(email).strip()})
+        if not cleaned_emails:
+            return
+        source_sql = "\nUNION ALL\n".join(
+            (
+                "SELECT "
+                "'campaign_monitor' AS target_system, "
+                "'subscriber' AS target_entity_type, "
+                f"'{self._escape_sql_literal(email)}' AS target_entity_id, "
+                "'prospect_lead' AS source_record_type, "
+                f"'{self._escape_sql_literal(email)}' AS source_record_id, "
+                "'synced' AS sync_status"
+            )
+            for email in cleaned_emails
+        )
+        query = f"""
+        MERGE `{self.settings.sync_targets_table_fqn}` AS target
+        USING (
+          {source_sql}
+        ) AS source
+        ON target.target_system = source.target_system
+           AND target.target_entity_type = source.target_entity_type
+           AND LOWER(target.target_entity_id) = LOWER(source.target_entity_id)
+           AND target.source_record_type = source.source_record_type
+           AND target.source_record_id = source.source_record_id
+        WHEN MATCHED THEN
+          UPDATE SET
+            target_entity_id = source.target_entity_id,
+            sync_status = source.sync_status,
+            last_synced_at = CURRENT_TIMESTAMP(),
+            updated_at = CURRENT_TIMESTAMP()
+        WHEN NOT MATCHED THEN
+          INSERT (
+            sync_target_id,
+            target_system,
+            target_entity_type,
+            target_entity_id,
+            source_record_type,
+            source_record_id,
+            sync_status,
+            last_synced_at,
+            created_at,
+            updated_at
+          )
+          VALUES (
+            GENERATE_UUID(),
+            source.target_system,
+            source.target_entity_type,
+            source.target_entity_id,
+            source.source_record_type,
+            source.source_record_id,
+            source.sync_status,
+            CURRENT_TIMESTAMP(),
+            CURRENT_TIMESTAMP(),
+            CURRENT_TIMESTAMP()
+          )
+        """
+        self.repository.execute_statement(query)
+
+    def _escape_sql_literal(self, value: str) -> str:
+        """Escape a value for direct interpolation into BigQuery string literals."""
+
+        return (
+            str(value)
+            .replace("\\", "\\\\")
+            .replace("'", "\\'")
+            .replace("\r", "\\r")
+            .replace("\n", "\\n")
+        )
 
     def _ensure_custom_fields(self, list_id: str, dry_run: bool) -> dict[str, str]:
         """Ensure required custom fields exist on the Campaign Monitor list."""
@@ -606,6 +788,50 @@ class CampaignMonitorService:
         rows = self.repository.fetch_all(query)
         return [str(row["inferred_brand"]).strip() for row in rows if row.get("inferred_brand")]
 
+    def _build_segment_definitions(
+        self,
+        brands: list[str],
+        field_map: dict[str, str],
+    ) -> list[SegmentDefinition]:
+        """Build OEM plus geography/audience segment definitions."""
+
+        definitions: list[SegmentDefinition] = []
+        oem_key = field_map.get("OEM", "[OEM]")
+
+        for brand in brands:
+            definitions.append(
+                SegmentDefinition(
+                    title=f"Automation {brand} Subscribers",
+                    rules=((oem_key, f"EQUALS {brand}"),),
+                )
+            )
+
+        for definition in self.STATIC_SEGMENT_DEFINITIONS:
+            definitions.append(
+                SegmentDefinition(
+                    title=definition.title,
+                    rules=tuple(
+                        (
+                            field_map.get(field_name, f"[{field_name}]"),
+                            f"EQUALS {value}",
+                        )
+                        for field_name, value in definition.rules
+                    ),
+                )
+            )
+
+        return definitions
+
+    def _remove_legacy_segments(self, list_id: str, segments: list[dict[str, Any]]) -> None:
+        """Delete legacy generic audience segments that overlap geo-specific ones."""
+
+        for segment in segments:
+            title = str(segment.get("Title", "")).strip()
+            segment_id = str(segment.get("SegmentID", "")).strip()
+            if title not in self.LEGACY_SEGMENT_TITLES or not segment_id:
+                continue
+            self._api_delete(f"/segments/{segment_id}.json")
+
     def _api_get(self, path: str) -> Any:
         """Send a GET request to Campaign Monitor and return the decoded JSON."""
 
@@ -640,3 +866,18 @@ class CampaignMonitorService:
         if response.headers.get("content-type", "").startswith("application/json"):
             return response.json()
         return response.text.strip().strip('"')
+
+    def _api_delete(
+        self,
+        path: str,
+        expected_statuses: tuple[int, ...] = (200, 202),
+    ) -> None:
+        """Send a DELETE request to Campaign Monitor."""
+
+        response = requests.delete(
+            f"{self.BASE_URL}{path}",
+            auth=(self.settings.campaign_monitor_api_key, "x"),
+            timeout=self.settings.request_timeout_seconds,
+        )
+        if response.status_code not in expected_statuses:
+            response.raise_for_status()

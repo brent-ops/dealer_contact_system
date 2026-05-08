@@ -60,6 +60,9 @@ BRAND_PATTERNS = {
     "vw": "Volkswagen",
     "volvo": "Volvo",
 }
+PHONE_REGEX = re.compile(
+    r"(?:\+?1[\s.\-]?)?(?:\(?\d{3}\)?[\s.\-]?)\d{3}[\s.\-]?\d{4}"
+)
 
 STAFF_PAGE_HINTS = [
     "/",
@@ -84,6 +87,7 @@ class AccountRecord:
     account_name_confidence_score: float
     brand_confidence_score: float
     location_confidence_score: float
+    account_phone_confidence_score: float
 
 
 @dataclass(frozen=True)
@@ -180,7 +184,8 @@ class AccountEnrichmentService:
           IFNULL(website_confidence_score, 0.0) AS website_confidence_score,
           IFNULL(account_name_confidence_score, 0.0) AS account_name_confidence_score,
           IFNULL(brand_confidence_score, 0.0) AS brand_confidence_score,
-          IFNULL(location_confidence_score, 0.0) AS location_confidence_score
+          IFNULL(location_confidence_score, 0.0) AS location_confidence_score,
+          IFNULL(account_phone_confidence_score, 0.0) AS account_phone_confidence_score
         FROM `{self.settings.dealer_accounts_table_fqn}`
         WHERE IFNULL(is_personal_domain, FALSE) = FALSE
           AND dealer_classification IN ('dealer', 'dealer_group')
@@ -208,6 +213,7 @@ class AccountEnrichmentService:
                 account_name_confidence_score=float(row["account_name_confidence_score"] or 0.0),
                 brand_confidence_score=float(row["brand_confidence_score"] or 0.0),
                 location_confidence_score=float(row["location_confidence_score"] or 0.0),
+                account_phone_confidence_score=float(row["account_phone_confidence_score"] or 0.0),
             )
             for row in rows
         ]
@@ -225,6 +231,8 @@ class AccountEnrichmentService:
           OR TRIM(inferred_brand) = ''
           OR account_city IS NULL
           OR account_state IS NULL
+          OR account_phone IS NULL
+          OR TRIM(account_phone) = ''
         )
         """
 
@@ -331,6 +339,18 @@ class AccountEnrichmentService:
             update["location_source_url"] = derived.get("location_source_url", homepage.final_url)
             update["location_confidence_score"] = derived["location_confidence_score"]
 
+        if derived.get("account_phone") and float(derived.get("account_phone_confidence_score", 0.0)) >= account.account_phone_confidence_score:
+            update["account_phone"] = derived["account_phone"]
+            update["account_phone_source_url"] = derived.get("account_phone_source_url", homepage.final_url)
+            update["account_phone_confidence_score"] = derived["account_phone_confidence_score"]
+            update["website_phone"] = derived["account_phone"]
+            update["website_phone_source_url"] = derived.get("account_phone_source_url", homepage.final_url)
+            update["website_phone_confidence_score"] = derived["account_phone_confidence_score"]
+            update["best_phone"] = derived["account_phone"]
+            update["best_phone_source"] = "website"
+            update["best_phone_source_url"] = derived.get("account_phone_source_url", homepage.final_url)
+            update["best_phone_confidence_score"] = derived["account_phone_confidence_score"]
+
         return update
 
     def _candidate_homepages(self, account: AccountRecord) -> list[str]:
@@ -425,6 +445,7 @@ class AccountEnrichmentService:
         name_candidate: tuple[str, float, str] | None = None
         brand_candidate: tuple[str, float, str] | None = None
         location_candidate: tuple[str, str, float, str] | None = None
+        phone_candidate: tuple[str, float, str] | None = None
 
         for page in pages:
             soup = BeautifulSoup(page.html, "html.parser")
@@ -450,6 +471,14 @@ class AccountEnrichmentService:
                     page.final_url,
                 )
 
+            page_phone = self._extract_phone(soup, page.html)
+            if page_phone and (not phone_candidate or page_phone[1] > phone_candidate[1]):
+                phone_candidate = (
+                    page_phone[0],
+                    page_phone[1],
+                    page.final_url,
+                )
+
         result: dict[str, object] = {
             "website_confidence_score": 0.95,
         }
@@ -469,6 +498,11 @@ class AccountEnrichmentService:
             result["account_state"] = location_candidate[1]
             result["location_confidence_score"] = location_candidate[2]
             result["location_source_url"] = location_candidate[3]
+
+        if phone_candidate:
+            result["account_phone"] = phone_candidate[0]
+            result["account_phone_confidence_score"] = phone_candidate[1]
+            result["account_phone_source_url"] = phone_candidate[2]
 
         return result
 
@@ -569,6 +603,39 @@ class AccountEnrichmentService:
                 return city, state, 0.72
         return None
 
+    def _extract_phone(self, soup: BeautifulSoup, html: str) -> tuple[str, float] | None:
+        """Extract a primary dealer phone number from JSON-LD, tel links, or page text."""
+
+        for script in soup.find_all("script", attrs={"type": "application/ld+json"}):
+            text = script.string or script.get_text(strip=True)
+            if not text:
+                continue
+            try:
+                payload = json.loads(text)
+            except json.JSONDecodeError:
+                continue
+
+            candidates = payload if isinstance(payload, list) else [payload]
+            for item in candidates:
+                if isinstance(item, dict):
+                    phone = self._normalize_phone(item.get("telephone"))
+                    if phone:
+                        return phone, 0.95
+
+        for link in soup.find_all("a", href=True):
+            href = str(link.get("href") or "")
+            if href.lower().startswith("tel:"):
+                phone = self._normalize_phone(href[4:])
+                if phone:
+                    return phone, 0.9
+
+        match = PHONE_REGEX.search(html)
+        if match:
+            phone = self._normalize_phone(match.group(0))
+            if phone:
+                return phone, 0.72
+        return None
+
     def _apply_updates(self, updates: list[dict[str, object]]) -> None:
         """Apply enrichment updates one row at a time for readable merge logic."""
 
@@ -621,6 +688,18 @@ class AccountEnrichmentService:
             return None
         cleaned = state.strip().upper()
         return cleaned if cleaned in US_STATE_CODES else None
+
+    def _normalize_phone(self, phone: object) -> str | None:
+        """Normalize a phone value into a simple North American display format."""
+
+        if not isinstance(phone, str):
+            return None
+        digits = re.sub(r"\D", "", phone)
+        if len(digits) == 11 and digits.startswith("1"):
+            digits = digits[1:]
+        if len(digits) != 10:
+            return None
+        return f"({digits[0:3]}) {digits[3:6]}-{digits[6:10]}"
 
     def _sql_literal(self, value: object) -> str:
         """Format a Python value as a BigQuery SQL literal."""

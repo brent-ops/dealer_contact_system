@@ -37,3 +37,9 @@ class BigQueryRepository:
         """Fetch all rows from a query as dictionaries."""
 
         return [dict(row.items()) for row in self.run_query(query)]
+
+    def insert_rows_json(self, table_fqn: str, rows: list[dict[str, Any]]) -> list[Any]:
+        """Insert JSON rows into a BigQuery table."""
+
+        table = self.client.get_table(table_fqn)
+        return self.client.insert_rows_json(table, rows)

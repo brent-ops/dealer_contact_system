@@ -33,32 +33,182 @@
         </div>
       </section>
 
-      <section class="card-grid metrics-grid">
-        <article class="card stat-card">
-          <span class="stat-label">Validated Dealers</span>
-          <strong class="stat-value">{{ "{:,}".format(data.overview.validated_dealers or 0) }}</strong>
+      <section class="card">
+        <div class="section-head">
+          <h2>Data Access</h2>
+          <p>Quick read-only access to the live client records table inside this dashboard.</p>
+        </div>
+        <div class="card-grid table-link-grid">
+          <article class="table-link-card">
+            <div>
+              <span class="stat-label">Client Records</span>
+              <strong class="table-link-name">{{ data.project_id }}.{{ data.dataset }}.prospect_leads</strong>
+              <p>Open the full read-only client records table in the UI so your team can review rows and fields without BigQuery access.</p>
+            </div>
+            <a class="table-link-button" href="{{ url_for('client_records') }}">
+              View Records
+            </a>
+          </article>
+          <article class="table-link-card">
+            <div>
+              <span class="stat-label">Discovery Candidates</span>
+              <strong class="table-link-name">{{ data.project_id }}.{{ data.dataset }}.discovered_domain_candidates</strong>
+              <p>Open the separate read-only discovery table so your team can review newly found domains before or after promotion.</p>
+            </div>
+            <a class="table-link-button" href="{{ url_for('discovery_candidates') }}">
+              View Discovery
+            </a>
+          </article>
+        </div>
+      </section>
+
+      {% if data.snapshot_warning %}
+      <section class="card alert-card">
+        <div class="section-head">
+          <h2>{{ data.snapshot_warning.title }}</h2>
+          <p>{{ data.snapshot_warning.detail }}</p>
+        </div>
+        <div class="list-stack">
+          <div class="metric-row">
+            <span>Last Snapshot Success</span>
+            <strong>{{ data.snapshot_warning.last_success_at }}</strong>
+          </div>
+        </div>
+      </section>
+      {% endif %}
+
+      <section class="card-grid two-column">
+        <article class="card">
+          <div class="section-head">
+            <h2>System Health</h2>
+            <p>Top-line health for the major runtime lanes and self-heal protection.</p>
+          </div>
+          <div class="connection-list">
+            {% for item in data.system_health_rows %}
+            <div class="connection-row">
+              <div>
+                <strong>{{ item.name }}</strong>
+                <p>{{ item.detail }}</p>
+              </div>
+              <span class="pill pill-{{ item.status }}">{{ item.status }}</span>
+            </div>
+            {% endfor %}
+          </div>
         </article>
-        <article class="card stat-card">
-          <span class="stat-label">Dealer Groups</span>
-          <strong class="stat-value">{{ "{:,}".format(data.overview.validated_dealer_groups or 0) }}</strong>
+
+        <article class="card">
+          <div class="section-head">
+            <h2>Platform Connections</h2>
+            <p>Downstream sync readiness for marketing and audience systems.</p>
+          </div>
+          <div class="connection-list">
+            {% for item in data.integration_connections %}
+            <div class="connection-row">
+              <div>
+                <strong>{{ item.name }}</strong>
+                <p>{{ item.detail }}</p>
+              </div>
+              <span class="pill pill-{{ item.status }}">{{ item.status }}</span>
+            </div>
+            {% endfor %}
+          </div>
         </article>
-        <article class="card stat-card">
-          <span class="stat-label">Website-Ready Dealers</span>
-          <strong class="stat-value">{{ "{:,}".format(data.overview.validated_websites or 0) }}</strong>
-        </article>
-        <article class="card stat-card">
-          <span class="stat-label">Website Contacts</span>
-          <strong class="stat-value">{{ "{:,}".format(data.overview.website_extracted_contacts or 0) }}</strong>
-        </article>
-        <article class="card stat-card">
-          <span class="stat-label">Queued Validate</span>
-          <strong class="stat-value">{{ "{:,}".format(data.overview.queued_validate or 0) }}</strong>
-        </article>
-        <article class="card stat-card">
-          <span class="stat-label">Blocked Fetches</span>
-          <strong class="stat-value">{{ "{:,}".format(data.overview.blocked_fetch_accounts or 0) }}</strong>
+
+        <article class="card">
+          <div class="section-head">
+            <h2>Cutover Health</h2>
+            <p>Parallel-worker ownership, audit, and duplicate-work safety for the new distributed model.</p>
+          </div>
+          <div class="connection-list">
+            {% for item in data.cutover_health_rows %}
+            <div class="connection-row">
+              <div>
+                <strong>{{ item.name }}</strong>
+                <p>{{ item.detail }}</p>
+              </div>
+              <span class="pill pill-{{ item.status }}">{{ item.status }}</span>
+            </div>
+            {% endfor %}
+          </div>
         </article>
       </section>
+
+      <section class="card">
+        <div class="section-head">
+          <h2>Process Health</h2>
+          <p>Lane-by-lane health so flat, backlogged, stale, and failed states are clearly separated.</p>
+        </div>
+        <table>
+          <thead>
+            <tr>
+              <th>Lane</th>
+              <th>Status</th>
+              <th>Last Success</th>
+              <th>Runs 24h</th>
+              <th>Processed 24h</th>
+              <th>Failed 24h</th>
+              <th>Discovery First Pass</th>
+              <th>Main-List First Pass</th>
+              <th>Follow-Up</th>
+              <th>Retry</th>
+              <th>Due Work</th>
+              <th>Queued</th>
+            </tr>
+          </thead>
+          <tbody>
+            {% for row in data.process_health_rows %}
+            <tr>
+              <td>
+                <strong>{{ row.label }}</strong>
+                <div class="table-subtext">{{ row.detail }}</div>
+              </td>
+              <td><span class="pill pill-{{ row.status }}">{{ row.status }}</span></td>
+              <td>{{ row.last_success_at }}</td>
+              <td>{{ "{:,}".format(row.runs_24h or 0) }}</td>
+              <td>{{ "{:,}".format(row.processed_24h or 0) }}</td>
+              <td>{{ "{:,}".format(row.failed_24h or 0) }}</td>
+              <td>{{ "{:,}".format(row.discovery_first_pass_count or 0) }}</td>
+              <td>{{ "{:,}".format(row.main_list_first_pass_count or 0) }}</td>
+              <td>{{ "{:,}".format(row.follow_up_count or 0) }}</td>
+              <td>{{ "{:,}".format(row.retry_count or 0) }}</td>
+              <td>{{ "{:,}".format(row.due_count or 0) }}</td>
+              <td>{{ "{:,}".format(row.queued_count or 0) }}</td>
+            </tr>
+            {% endfor %}
+          </tbody>
+        </table>
+      </section>
+
+      {% if data.frontier_rows %}
+      <section class="card">
+        <div class="section-head">
+          <h2>Frontier Priority</h2>
+          <p>Discovery-promoted first pass should drain before untouched main-list work, and both should outrank retries.</p>
+        </div>
+        <table>
+          <thead>
+            <tr>
+              <th>Lane</th>
+              <th>Discovery First Pass</th>
+              <th>Main-List First Pass</th>
+              <th>Follow-Up</th>
+              <th>Retry</th>
+            </tr>
+          </thead>
+          <tbody>
+            {% for row in data.frontier_rows %}
+            <tr>
+              <td>{{ row.lane_label }}</td>
+              <td>{{ "{:,}".format(row.discovery_first_pass_count or 0) }}</td>
+              <td>{{ "{:,}".format(row.main_list_first_pass_count or 0) }}</td>
+              <td>{{ "{:,}".format(row.follow_up_count or 0) }}</td>
+              <td>{{ "{:,}".format(row.retry_count or 0) }}</td>
+            </tr>
+            {% endfor %}
+          </tbody>
+        </table>
+      </section>
+      {% endif %}
 
       <section class="card">
         <div class="section-head">
@@ -113,44 +263,6 @@
       <section class="card-grid two-column">
         <article class="card">
           <div class="section-head">
-            <h2>Connections</h2>
-            <p>High-level health for data and runtime dependencies.</p>
-          </div>
-          <div class="connection-list">
-            {% for item in data.connections %}
-            <div class="connection-row">
-              <div>
-                <strong>{{ item.name }}</strong>
-                <p>{{ item.detail }}</p>
-              </div>
-              <span class="pill pill-{{ item.status }}">{{ item.status }}</span>
-            </div>
-            {% endfor %}
-          </div>
-        </article>
-
-        <article class="card">
-          <div class="section-head">
-            <h2>Platform Connections</h2>
-            <p>Downstream sync readiness for marketing and audience systems.</p>
-          </div>
-          <div class="connection-list">
-            {% for item in data.integration_connections %}
-            <div class="connection-row">
-              <div>
-                <strong>{{ item.name }}</strong>
-                <p>{{ item.detail }}</p>
-              </div>
-              <span class="pill pill-{{ item.status }}">{{ item.status }}</span>
-            </div>
-            {% endfor %}
-          </div>
-        </article>
-      </section>
-
-      <section class="card-grid two-column">
-        <article class="card">
-          <div class="section-head">
             <h2>Queue Throughput</h2>
             <p>Backlog and completion by worker type.</p>
           </div>
@@ -196,10 +308,182 @@
               <strong>{{ "{:,}".format(data.overview.prospect_contacts or 0) }}</strong>
             </div>
             <div class="metric-row">
+              <span>Prospect Leads</span>
+              <strong>{{ "{:,}".format(data.overview.prospect_leads or 0) }}</strong>
+            </div>
+            <div class="metric-row">
+              <span>Activation-Ready Accounts</span>
+              <strong>{{ "{:,}".format(data.overview.activation_ready_accounts or 0) }}</strong>
+            </div>
+            <div class="metric-row">
+              <span>Accounts With Phone</span>
+              <strong>{{ "{:,}".format(data.overview.accounts_with_phone or 0) }}</strong>
+            </div>
+            <div class="metric-row">
+              <span>Accounts With Website Phone</span>
+              <strong>{{ "{:,}".format(data.overview.accounts_with_website_phone or 0) }}</strong>
+            </div>
+            <div class="metric-row">
+              <span>Accounts With GBP Phone</span>
+              <strong>{{ "{:,}".format(data.overview.accounts_with_gbp_phone or 0) }}</strong>
+            </div>
+            <div class="metric-row">
+              <span>Accounts With AI Phone</span>
+              <strong>{{ "{:,}".format(data.overview.accounts_with_ai_phone or 0) }}</strong>
+            </div>
+            <div class="metric-row">
+              <span>Accounts With GBP Address</span>
+              <strong>{{ "{:,}".format(data.overview.accounts_with_gbp_address or 0) }}</strong>
+            </div>
+            <div class="metric-row">
+              <span>Accounts With AI Address</span>
+              <strong>{{ "{:,}".format(data.overview.accounts_with_ai_address or 0) }}</strong>
+            </div>
+            <div class="metric-row">
+              <span>Best Phone From GBP</span>
+              <strong>{{ "{:,}".format(data.overview.accounts_with_best_phone_from_gbp or 0) }}</strong>
+            </div>
+            <div class="metric-row">
+              <span>Best Phone From AI</span>
+              <strong>{{ "{:,}".format(data.overview.accounts_with_best_phone_from_ai or 0) }}</strong>
+            </div>
+            <div class="metric-row">
+              <span>Activation-Ready Contacts</span>
+              <strong>{{ "{:,}".format(data.overview.activation_ready_contacts or 0) }}</strong>
+            </div>
+            <div class="metric-row">
+              <span>Marketing-Ready Contacts</span>
+              <strong>{{ "{:,}".format(data.overview.marketing_ready_contacts or 0) }}</strong>
+            </div>
+            <div class="metric-row">
+              <span>Sales-Ready Leads</span>
+              <strong>{{ "{:,}".format(data.overview.sales_ready_leads or 0) }}</strong>
+            </div>
+            <div class="metric-row">
+              <span>Current Clients</span>
+              <strong>{{ "{:,}".format(data.overview.current_client_contacts or 0) }}</strong>
+            </div>
+            <div class="metric-row">
+              <span>Canada Contacts</span>
+              <strong>{{ "{:,}".format(data.overview.canada_contacts or 0) }}</strong>
+            </div>
+            <div class="metric-row">
+              <span>DIM Matched Leads</span>
+              <strong>{{ "{:,}".format(data.overview.dim_matched_leads or 0) }}</strong>
+            </div>
+            <div class="metric-row">
+              <span>Suppressed Leads</span>
+              <strong>{{ "{:,}".format(data.overview.dim_suppressed_leads or 0) }}</strong>
+            </div>
+            <div class="metric-row">
               <span>Pipeline Runs Logged</span>
               <strong>{{ "{:,}".format(data.overview.pipeline_runs or 0) }}</strong>
             </div>
+            <div class="metric-row">
+              <span>Managed Fetch Eligible</span>
+              <strong>{{ "{:,}".format(data.overview.managed_fetch_eligible_accounts or 0) }}</strong>
+            </div>
+            <div class="metric-row">
+              <span>Queued AI Account Facts</span>
+              <strong>{{ "{:,}".format(data.overview.queued_ai_account_facts or 0) }}</strong>
+            </div>
+            <div class="metric-row">
+              <span>Queued Discovery Tasks</span>
+              <strong>{{ "{:,}".format(data.overview.queued_discovery_tasks or 0) }}</strong>
+            </div>
+            <div class="metric-row">
+              <span>Discovery Candidates</span>
+              <strong>{{ "{:,}".format(data.overview.discovery_candidates or 0) }}</strong>
+            </div>
           </div>
+        </article>
+      </section>
+
+      <section class="card-grid two-column">
+        <article class="card">
+          <div class="section-head">
+            <h2>Discovery Lane</h2>
+            <p>Separate search-only system for new candidate dealer domains, with its own runtime and egress.</p>
+          </div>
+          <div class="list-stack">
+            <div class="metric-row">
+              <span>Queued Discovery Tasks</span>
+              <strong>{{ "{:,}".format(data.discovery_overview.queued_tasks or 0) }}</strong>
+            </div>
+            <div class="metric-row">
+              <span>Discovery Runs Last 24h</span>
+              <strong>{{ "{:,}".format(data.discovery_overview.runs_last_24h or 0) }}</strong>
+            </div>
+            <div class="metric-row">
+              <span>Total Candidate Domains</span>
+              <strong>{{ "{:,}".format(data.discovery_overview.total_candidates or 0) }}</strong>
+            </div>
+            <div class="metric-row">
+              <span>New Candidates</span>
+              <strong>{{ "{:,}".format(data.discovery_overview.new_candidates or 0) }}</strong>
+            </div>
+            <div class="metric-row">
+              <span>Duplicate Existing Domains</span>
+              <strong>{{ "{:,}".format(data.discovery_overview.duplicate_existing_candidates or 0) }}</strong>
+            </div>
+            <div class="metric-row">
+              <span>Promoted Candidates</span>
+              <strong>{{ "{:,}".format(data.discovery_overview.promoted_candidates or 0) }}</strong>
+            </div>
+            <div class="metric-row">
+              <span>Rejected Candidates</span>
+              <strong>{{ "{:,}".format(data.discovery_overview.rejected_candidates or 0) }}</strong>
+            </div>
+            <div class="metric-row">
+              <span>Last Discovery Run</span>
+              <strong>{{ data.discovery_overview.last_run_at or "-" }}</strong>
+            </div>
+          </div>
+          <div class="mini-subsection">
+            <div class="mini-subsection-head">
+              <h3>Discovery Infrastructure</h3>
+              <a class="table-link-button table-link-button-muted" href="{{ url_for('discovery_candidates') }}">
+                View Discovery Table
+              </a>
+            </div>
+            <div class="compact-metric-grid">
+              {% for row in data.discovery_runtime %}
+              <div class="compact-metric-card">
+                <span class="stat-label">{{ row.label }}</span>
+                <strong>{{ row.value }}</strong>
+              </div>
+              {% endfor %}
+            </div>
+          </div>
+        </article>
+
+        <article class="card">
+          <div class="section-head">
+            <h2>Recent Discovery Runs</h2>
+            <p>Independent run log for the separate discovery worker.</p>
+          </div>
+          <table>
+            <thead>
+              <tr>
+                <th>Run Type</th>
+                <th>Status</th>
+                <th>Claimed</th>
+                <th>Succeeded</th>
+                <th>Failed</th>
+              </tr>
+            </thead>
+            <tbody>
+              {% for row in data.recent_discovery_runs %}
+              <tr>
+                <td>{{ row.run_type }}</td>
+                <td><span class="pill pill-{{ 'healthy' if row.run_status == 'completed' else 'warning' if row.run_status in ('running', 'preview', 'partial_failure') else 'error' }}">{{ row.run_status }}</span></td>
+                <td>{{ "{:,}".format(row.claimed_count or 0) }}</td>
+                <td>{{ "{:,}".format(row.succeeded_count or 0) }}</td>
+                <td>{{ "{:,}".format(row.failed_count or 0) }}</td>
+              </tr>
+              {% endfor %}
+            </tbody>
+          </table>
         </article>
       </section>
 
@@ -231,6 +515,28 @@
               <strong>{{ "{:,}".format(row.total_accounts or 0) }}</strong>
             </div>
             {% endfor %}
+          </div>
+        </article>
+
+          <article class="card">
+            <div class="section-head">
+              <h2>AI Retrieval</h2>
+              <p>Recent provider results from the last 24 hours for protected-site account facts.</p>
+            </div>
+            <div class="list-stack">
+             {% if data.ai_provider_counts %}
+             {% for row in data.ai_provider_counts %}
+              <div class="metric-row">
+               <span>{{ row.label }}: {{ "{:,}".format(row.successful_retrievals or 0) }} ok / {{ "{:,}".format(row.failed_retrievals or 0) }} failed / {{ "{:,}".format(row.rate_limited_retrievals or 0) }} rate-limited</span>
+                <strong>{{ "{:,}".format(row.total_attempts or 0) }}</strong>
+              </div>
+              {% endfor %}
+              {% else %}
+              <div class="empty-state">
+                <strong>No recent AI retrieval activity</strong>
+                <p>The last 24 hours do not have any AI provider result rows yet.</p>
+              </div>
+              {% endif %}
           </div>
         </article>
 
@@ -342,6 +648,7 @@
               <th>Website</th>
               <th>Blocked Reason</th>
               <th>Attempts</th>
+              <th>Managed Fetch</th>
             </tr>
           </thead>
           <tbody>
@@ -358,6 +665,7 @@
               </td>
               <td>{{ row.blocked_reason or "-" }}</td>
               <td>{{ "{:,}".format(row.blocked_attempt_count or 0) }}</td>
+              <td>{{ row.managed_fetch_status or "-" }}</td>
             </tr>
             {% endfor %}
           </tbody>

@@ -121,8 +121,18 @@ h1 {
   margin-bottom: 0;
 }
 
+.table-link-grid {
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  margin-bottom: 0;
+}
+
 .card {
   padding: 20px;
+}
+
+.alert-card {
+  border-color: rgba(184, 92, 56, 0.25);
+  background: rgba(255, 246, 240, 0.92);
 }
 
 .stat-card {
@@ -218,6 +228,56 @@ h1 {
   stroke-linejoin: round;
 }
 
+.table-link-card {
+  background: rgba(255, 248, 237, 0.72);
+  border: 1px solid rgba(68, 84, 74, 0.1);
+  border-radius: 16px;
+  padding: 18px;
+  display: flex;
+  justify-content: space-between;
+  gap: 18px;
+  align-items: end;
+}
+
+.table-link-card p {
+  margin: 8px 0 0;
+  color: rgba(29, 43, 44, 0.72);
+}
+
+.table-link-name {
+  display: block;
+  margin-top: 8px;
+  font-size: 18px;
+}
+
+.table-link-button {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  min-width: 120px;
+  padding: 11px 16px;
+  border-radius: 999px;
+  background: var(--terracotta);
+  color: #fff8f2;
+  text-decoration: none;
+  font-weight: 700;
+  box-shadow: 0 12px 24px rgba(184, 92, 56, 0.18);
+}
+
+.table-link-button:hover {
+  background: #9e4929;
+}
+
+.table-link-button-muted {
+  background: rgba(68, 84, 74, 0.12);
+  color: var(--ink);
+  box-shadow: none;
+}
+
+.table-link-button-muted:hover {
+  background: rgba(68, 84, 74, 0.18);
+}
+
 .section-head {
   margin-bottom: 14px;
 }
@@ -225,6 +285,45 @@ h1 {
 .section-head p {
   margin: 6px 0 0;
   color: rgba(29, 43, 44, 0.72);
+}
+
+.mini-subsection {
+  margin-top: 18px;
+  padding-top: 18px;
+  border-top: 1px solid rgba(68, 84, 74, 0.08);
+}
+
+.mini-subsection-head {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px;
+  margin-bottom: 14px;
+}
+
+.mini-subsection-head h3 {
+  margin: 0;
+  font-size: 18px;
+}
+
+.compact-metric-grid {
+  display: grid;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  gap: 12px;
+}
+
+.compact-metric-card {
+  padding: 14px;
+  border-radius: 14px;
+  background: rgba(255, 248, 237, 0.72);
+  border: 1px solid rgba(68, 84, 74, 0.1);
+}
+
+.compact-metric-card strong {
+  display: block;
+  margin-top: 6px;
+  font-size: 15px;
+  word-break: break-word;
 }
 
 .connection-list,
@@ -253,6 +352,16 @@ h1 {
   color: rgba(29, 43, 44, 0.72);
 }
 
+.empty-state {
+  padding: 14px 0;
+  color: rgba(29, 43, 44, 0.82);
+}
+
+.empty-state p {
+  margin: 6px 0 0;
+  color: rgba(29, 43, 44, 0.72);
+}
+
 .pill {
   display: inline-flex;
   align-items: center;
@@ -275,9 +384,28 @@ h1 {
   color: #765e21;
 }
 
+.pill-flat {
+  background: rgba(68, 84, 74, 0.1);
+  color: #44544a;
+}
+
+.pill-backlogged {
+  background: rgba(184, 148, 71, 0.16);
+  color: #765e21;
+}
+
+.pill-stale,
+.pill-failed,
 .pill-error {
   background: rgba(184, 92, 56, 0.16);
   color: #7b2b10;
+}
+
+.table-subtext {
+  margin-top: 6px;
+  color: rgba(29, 43, 44, 0.72);
+  font-size: 13px;
+  line-height: 1.4;
 }
 
 table {
@@ -305,13 +433,71 @@ tbody tr:last-child td {
   border-bottom: 0;
 }
 
+.records-toolbar {
+  display: flex;
+  justify-content: space-between;
+  gap: 18px;
+  align-items: end;
+  margin-bottom: 18px;
+}
+
+.records-toolbar-copy p {
+  margin: 8px 0 0;
+  color: rgba(29, 43, 44, 0.72);
+}
+
+.records-toolbar-actions {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 12px;
+}
+
+.records-table-wrap {
+  overflow: auto;
+  border: 1px solid rgba(68, 84, 74, 0.08);
+  border-radius: 16px;
+}
+
+.records-table {
+  min-width: 1800px;
+}
+
+.records-table td {
+  max-width: 280px;
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+
 @media (max-width: 1100px) {
   .hero,
   .metrics-grid,
   .delta-grid,
   .sparkline-grid,
+  .table-link-grid,
   .two-column,
   .three-column {
     grid-template-columns: 1fr;
+  }
+
+  .compact-metric-grid {
+    grid-template-columns: 1fr;
+  }
+}
+
+@media (max-width: 720px) {
+  .records-toolbar {
+    align-items: start;
+    flex-direction: column;
+  }
+
+  .table-link-card {
+    align-items: start;
+    flex-direction: column;
+  }
+
+  .mini-subsection-head {
+    align-items: start;
+    flex-direction: column;
   }
 }

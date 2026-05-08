@@ -4,6 +4,7 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 import re
+import time
 from urllib.parse import urljoin, urlparse
 
 from bs4 import BeautifulSoup
@@ -16,6 +17,8 @@ from app.web_fetcher import WebFetcher
 
 logger = get_logger(__name__)
 MIN_WRITE_CONFIDENCE = 0.8
+SERIALIZATION_RETRY_ATTEMPTS = 5
+SERIALIZATION_RETRY_BASE_SECONDS = 1.0
 
 OEM_PATTERNS = [
     r"\bford motor company\b",
@@ -915,7 +918,7 @@ class DealerValidationService:
           updated_at = CURRENT_TIMESTAMP()
         WHERE dealer_account_id = '{result.dealer_account_id}'
         """
-        self.repository.execute_statement(query)
+        self._execute_account_update_with_retry(query, result.dealer_account_id)
 
     def _mark_checked(self, dealer_account_id: str) -> None:
         """Record that an account was reviewed even if no trusted classification was saved."""
@@ -927,4 +930,26 @@ class DealerValidationService:
           updated_at = CURRENT_TIMESTAMP()
         WHERE dealer_account_id = '{dealer_account_id}'
         """
-        self.repository.execute_statement(query)
+        self._execute_account_update_with_retry(query, dealer_account_id)
+
+    def _execute_account_update_with_retry(self, query: str, dealer_account_id: str) -> None:
+        """Retry transient BigQuery serialization conflicts for account-table writes."""
+
+        delay_seconds = SERIALIZATION_RETRY_BASE_SECONDS
+        for attempt in range(1, SERIALIZATION_RETRY_ATTEMPTS + 1):
+            try:
+                self.repository.execute_statement(query)
+                return
+            except Exception as exc:
+                message = str(exc)
+                is_serialization_conflict = "Could not serialize access to table" in message
+                if not is_serialization_conflict or attempt >= SERIALIZATION_RETRY_ATTEMPTS:
+                    raise
+                logger.warning(
+                    "Retrying dealer validation account write after serialization conflict | dealer_account_id=%s | attempt=%s | delay_seconds=%.1f",
+                    dealer_account_id,
+                    attempt,
+                    delay_seconds,
+                )
+                time.sleep(delay_seconds)
+                delay_seconds *= 2

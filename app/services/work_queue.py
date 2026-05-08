@@ -3,26 +3,33 @@
 from __future__ import annotations
 
 from dataclasses import dataclass
+from datetime import datetime, timezone
 import uuid
 
 from app.bigquery_repository import BigQueryRepository
 from app.config import Settings
 from app.logging_utils import get_logger
 from app.services.account_enrichment import AccountEnrichmentService
+from app.services.ai_retrieval import AiRetrievalService
 from app.services.browser_retry import BrowserRetryService
 from app.services.contact_extraction import ContactExtractionService
 from app.services.dealer_validation import DealerValidationService
+from app.services.gbp_enrichment import GbpEnrichmentService
 
 
 logger = get_logger(__name__)
 
 TASK_VALIDATE = "validate"
 TASK_ENRICH = "enrich"
+TASK_ENRICH_GBP = "enrich_gbp"
+TASK_AI_ACCOUNT_FACTS = "ai_account_facts"
 TASK_EXTRACT_CONTACTS = "extract_contacts"
 TASK_RETRY_BLOCKED = "retry_blocked"
 TASK_TYPES = [
     TASK_VALIDATE,
     TASK_ENRICH,
+    TASK_ENRICH_GBP,
+    TASK_AI_ACCOUNT_FACTS,
     TASK_EXTRACT_CONTACTS,
     TASK_RETRY_BLOCKED,
 ]
@@ -129,6 +136,8 @@ class WorkQueueService:
         self.run_logger = PipelineRunLogger(repository, settings)
         self.dealer_validation = DealerValidationService(repository, settings)
         self.account_enrichment = AccountEnrichmentService(repository, settings)
+        self.gbp_enrichment = GbpEnrichmentService(repository, settings)
+        self.ai_retrieval = AiRetrievalService(repository, settings)
         self.contact_extraction = ContactExtractionService(repository, settings)
         self.browser_retry = BrowserRetryService(repository, settings)
 
@@ -164,6 +173,11 @@ class WorkQueueService:
         if task_type == TASK_RETRY_BLOCKED:
             self._seed_retry_blocked_queue()
             logger.info("Seeded work queue | task_type=%s", task_type)
+            return
+        if task_type == TASK_AI_ACCOUNT_FACTS and (
+            not self.settings.ai_retrieval_enabled or not self.ai_retrieval._configured_providers()
+        ):
+            logger.info("Skipped AI queue seed because AI retrieval is not configured.")
             return
 
         source_query = self._seed_source_query(task_type)
@@ -303,6 +317,10 @@ class WorkQueueService:
         if dry_run:
             return
 
+        if not self._should_run_task_now(task_type):
+            logger.info("Skipped worker run because task is cooling down | task_type=%s", task_type)
+            return
+
         worker_id = str(uuid.uuid4())
         pipeline_run_id = self.run_logger.start_run(
             task_type=task_type,
@@ -361,6 +379,39 @@ class WorkQueueService:
             failed_count=0,
         )
 
+    def _should_run_task_now(self, task_type: str) -> bool:
+        """Return True when the task should run on this cycle."""
+
+        if task_type != TASK_AI_ACCOUNT_FACTS:
+            return True
+
+        minimum_interval = max(self.settings.ai_retrieval_min_run_interval_minutes, 0)
+        if minimum_interval <= 0:
+            return True
+
+        query = f"""
+        SELECT
+          MAX(started_at) AS last_started_at
+        FROM `{self.settings.pipeline_runs_table_fqn}`
+        WHERE task_type = '{TASK_AI_ACCOUNT_FACTS}'
+          AND run_status IN ('running', 'completed')
+        """
+        row = self.repository.fetch_one(query)
+        last_started_at = row.get("last_started_at")
+        if not last_started_at:
+            return True
+        if isinstance(last_started_at, str):
+            try:
+                last_started_at = datetime.fromisoformat(last_started_at.replace("Z", "+00:00"))
+            except ValueError:
+                return True
+        if not isinstance(last_started_at, datetime):
+            return True
+        if last_started_at.tzinfo is None:
+            last_started_at = last_started_at.replace(tzinfo=timezone.utc)
+        elapsed_seconds = (datetime.now(timezone.utc) - last_started_at.astimezone(timezone.utc)).total_seconds()
+        return elapsed_seconds >= (minimum_interval * 60)
+
     def _seed_source_query(self, task_type: str) -> str:
         """Return the source query used to seed queue rows."""
 
@@ -390,6 +441,47 @@ class WorkQueueService:
                 OR TRIM(inferred_brand) = ''
                 OR account_city IS NULL
                 OR account_state IS NULL
+              )
+            """
+        if task_type == TASK_ENRICH_GBP:
+            return f"""
+            SELECT
+              '{TASK_ENRICH_GBP}' AS task_type,
+              account_key,
+              70 AS priority
+            FROM `{self.settings.dealer_accounts_table_fqn}`
+            WHERE dealer_classification IN ('dealer', 'dealer_group')
+              AND (
+                best_phone IS NULL
+                OR TRIM(best_phone) = ''
+                OR gbp_address_line IS NULL
+                OR TRIM(gbp_address_line) = ''
+                OR account_city IS NULL
+                OR account_state IS NULL
+                OR fetch_status = 'blocked'
+              )
+            """
+        if task_type == TASK_AI_ACCOUNT_FACTS:
+            return f"""
+            SELECT
+              '{TASK_AI_ACCOUNT_FACTS}' AS task_type,
+              account_key,
+              65 AS priority
+            FROM `{self.settings.dealer_accounts_table_fqn}`
+            WHERE dealer_classification IN ('dealer', 'dealer_group')
+              AND (
+                fetch_status = 'blocked'
+                OR managed_fetch_status = 'eligible'
+                OR website_url IS NULL
+                OR TRIM(website_url) = ''
+                OR best_phone IS NULL
+                OR TRIM(best_phone) = ''
+                OR account_city IS NULL
+                OR account_state IS NULL
+              )
+              AND (
+                next_ai_retrieval_at IS NULL
+                OR next_ai_retrieval_at <= CURRENT_TIMESTAMP()
               )
             """
         if task_type == TASK_EXTRACT_CONTACTS:
@@ -442,6 +534,23 @@ class WorkQueueService:
     ) -> list[dict[str, str]]:
         """Lease a batch of queue rows to this worker."""
 
+        reclaim_query = f"""
+        UPDATE `{self.settings.account_work_queue_table_fqn}`
+        SET
+          status = 'retry',
+          lease_owner = NULL,
+          lease_expires_at = NULL,
+          next_attempt_at = CURRENT_TIMESTAMP(),
+          last_error = COALESCE(last_error, 'Worker lease expired before completion.'),
+          updated_at = CURRENT_TIMESTAMP()
+        WHERE task_type = '{task_type}'
+          AND status = 'in_progress'
+          AND lease_expires_at IS NOT NULL
+          AND lease_expires_at <= CURRENT_TIMESTAMP()
+        """
+        self.repository.execute_statement(reclaim_query)
+
+        task_specific_eligibility_sql = self._claim_eligibility_sql(task_type)
         update_query = f"""
         UPDATE `{self.settings.account_work_queue_table_fqn}`
         SET
@@ -458,6 +567,7 @@ class WorkQueueService:
             AND status IN ('pending', 'retry')
             AND (next_attempt_at IS NULL OR next_attempt_at <= CURRENT_TIMESTAMP())
             AND (lease_expires_at IS NULL OR lease_expires_at <= CURRENT_TIMESTAMP())
+            {task_specific_eligibility_sql}
           ORDER BY priority DESC, created_at ASC
           LIMIT {batch_size}
         )
@@ -473,6 +583,24 @@ class WorkQueueService:
         ORDER BY priority DESC, created_at ASC
         """
         return [dict(row.items()) for row in self.repository.run_query(fetch_query)]
+
+    def _claim_eligibility_sql(self, task_type: str) -> str:
+        """Return extra claim-time eligibility filters for special queue types."""
+
+        if task_type != TASK_AI_ACCOUNT_FACTS:
+            return ""
+
+        return f"""
+            AND account_key IN (
+              SELECT account_key
+              FROM `{self.settings.dealer_accounts_table_fqn}`
+              WHERE dealer_classification IN ('dealer', 'dealer_group')
+                AND (
+                  next_ai_retrieval_at IS NULL
+                  OR next_ai_retrieval_at <= CURRENT_TIMESTAMP()
+                )
+            )
+        """
 
     def _mark_completed(self, task_type: str, account_keys: list[str]) -> None:
         """Mark queue rows complete after a successful worker batch."""
@@ -528,6 +656,22 @@ class WorkQueueService:
                 limit=limit,
                 account_keys=account_keys,
             )
+            return
+        if task_type == TASK_ENRICH_GBP:
+            self.gbp_enrichment.enrich(
+                dry_run=False,
+                limit=limit,
+                account_keys=account_keys,
+            )
+            return
+        if task_type == TASK_AI_ACCOUNT_FACTS:
+            result = self.ai_retrieval.refresh_account_facts(
+                dry_run=False,
+                limit=limit,
+                account_keys=account_keys,
+            )
+            if result.status in {"warning", "failed"}:
+                raise RuntimeError(result.detail)
             return
         if task_type == TASK_EXTRACT_CONTACTS:
             self.contact_extraction.extract(

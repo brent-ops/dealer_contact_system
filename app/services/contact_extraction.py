@@ -139,6 +139,7 @@ class ContactExtractionService:
         for candidate in deduped:
             self._upsert_contact(candidate)
             self._upsert_relationship(candidate)
+            self._supersede_ai_inferred_contacts(candidate)
 
     def _load_accounts(self, limit: int | None, account_keys: list[str] | None) -> list[dict[str, str]]:
         """Load account websites that are ready for contact extraction."""
@@ -244,8 +245,12 @@ class ContactExtractionService:
 
         for anchor in soup.find_all("a", href=True):
             href = anchor["href"].strip()
-            full_url = urljoin(homepage.final_url, href)
-            parsed = urlparse(full_url)
+            try:
+                full_url = urljoin(homepage.final_url, href)
+                parsed = urlparse(full_url)
+            except ValueError:
+                logger.debug("Skipping malformed page link during contact extraction | href=%s", href)
+                continue
             if parsed.netloc != base_netloc:
                 continue
 
@@ -367,7 +372,11 @@ class ContactExtractionService:
         for value in [account.get("account_key"), account.get("website_url"), page.final_url]:
             if not value:
                 continue
-            host = urlparse(value).netloc or value
+            try:
+                host = urlparse(value).netloc or value
+            except ValueError:
+                logger.debug("Skipping malformed host while building allowed email domains | value=%s", value)
+                continue
             host = host.lower().strip()
             host = host.removeprefix("www.")
             if host:
@@ -504,6 +513,10 @@ class ContactExtractionService:
             '{candidate.role_type}' AS role_type,
             '{candidate.role_family}' AS role_family,
             '{candidate.role_title.replace("'", "''")}' AS role_title,
+            'website_observed' AS email_quality,
+            'website_contact_extraction' AS email_source_type,
+            '{candidate.source_url.replace("'", "''")}' AS email_source_url,
+            {candidate.confidence_score} AS email_confidence_score,
             'active' AS contact_status,
             {candidate.confidence_score} AS confidence_score,
             'website_contact_extraction' AS source_type,
@@ -522,6 +535,10 @@ class ContactExtractionService:
             target.role_type = IF(source.confidence_score >= IFNULL(target.confidence_score, 0.0), source.role_type, target.role_type),
             target.role_family = IF(source.confidence_score >= IFNULL(target.confidence_score, 0.0), source.role_family, target.role_family),
             target.role_title = IF(source.confidence_score >= IFNULL(target.confidence_score, 0.0), source.role_title, target.role_title),
+            target.email_quality = 'website_observed',
+            target.email_source_type = source.email_source_type,
+            target.email_source_url = source.email_source_url,
+            target.email_confidence_score = GREATEST(IFNULL(target.email_confidence_score, 0.0), source.email_confidence_score),
             target.contact_status = source.contact_status,
             target.confidence_score = GREATEST(IFNULL(target.confidence_score, 0.0), source.confidence_score),
             target.source_type = source.source_type,
@@ -544,6 +561,10 @@ class ContactExtractionService:
             role_type,
             role_title,
             role_family,
+            email_quality,
+            email_source_type,
+            email_source_url,
+            email_confidence_score,
             contact_status,
             confidence_score,
             source_type,
@@ -567,6 +588,10 @@ class ContactExtractionService:
             source.role_type,
             source.role_title,
             source.role_family,
+            source.email_quality,
+            source.email_source_type,
+            source.email_source_url,
+            source.email_confidence_score,
             source.contact_status,
             source.confidence_score,
             source.source_type,
@@ -649,3 +674,44 @@ class ContactExtractionService:
           )
         """
         self.repository.execute_statement(query)
+
+    def _supersede_ai_inferred_contacts(self, candidate: ContactCandidate) -> None:
+        """Mark weaker AI-inferred contacts as superseded when a website-observed email exists."""
+
+        full_name_sql = candidate.full_name.replace("'", "''").lower()
+        email_sql = candidate.email.replace("'", "''").lower()
+        dealer_account_id_sql = candidate.dealer_account_id.replace("'", "''")
+        contact_query = f"""
+        UPDATE `{self.settings.prospect_contacts_table_fqn}` AS pc
+        SET
+          contact_status = 'superseded',
+          activation_status = 'hold',
+          enrichment_stage = 'superseded',
+          updated_at = CURRENT_TIMESTAMP()
+        WHERE pc.source_type = 'ai_inferred_directory_email'
+          AND LOWER(IFNULL(pc.full_name, '')) = '{full_name_sql}'
+          AND LOWER(pc.email) != '{email_sql}'
+          AND EXISTS (
+            SELECT 1
+            FROM `{self.settings.account_relationships_table_fqn}` AS ar
+            WHERE ar.prospect_contact_id = pc.prospect_contact_id
+              AND ar.dealer_account_id = '{dealer_account_id_sql}'
+          )
+        """
+        relationship_query = f"""
+        UPDATE `{self.settings.account_relationships_table_fqn}` AS ar
+        SET
+          relationship_status = 'superseded',
+          updated_at = CURRENT_TIMESTAMP()
+        WHERE ar.source_type = 'ai_inferred_directory_email'
+          AND ar.dealer_account_id = '{dealer_account_id_sql}'
+          AND ar.prospect_contact_id IN (
+            SELECT pc.prospect_contact_id
+            FROM `{self.settings.prospect_contacts_table_fqn}` AS pc
+            WHERE pc.source_type = 'ai_inferred_directory_email'
+              AND LOWER(IFNULL(pc.full_name, '')) = '{full_name_sql}'
+              AND LOWER(pc.email) != '{email_sql}'
+          )
+        """
+        self.repository.execute_statement(contact_query)
+        self.repository.execute_statement(relationship_query)

@@ -3,9 +3,14 @@
 from __future__ import annotations
 
 from dataclasses import dataclass
+import time
 
 from app.bigquery_repository import BigQueryRepository
 from app.config import Settings
+from app.logging_utils import get_logger
+
+
+logger = get_logger(__name__)
 
 
 @dataclass(frozen=True)
@@ -54,4 +59,28 @@ class FetchStatusTracker:
           updated_at = CURRENT_TIMESTAMP()
         WHERE dealer_account_id = '{update.dealer_account_id}'
         """
-        self.repository.execute_statement(query)
+        self._execute_with_retry(query, update)
+
+    def _execute_with_retry(self, query: str, update: FetchTrackingUpdate) -> None:
+        """Retry transient dealer-account write conflicts for fetch tracking."""
+
+        max_attempts = 5
+        delay_seconds = 1.0
+        for attempt in range(1, max_attempts + 1):
+            try:
+                self.repository.execute_statement(query)
+                return
+            except Exception as exc:
+                message = str(exc)
+                is_retryable = "Could not serialize access to table" in message
+                if not is_retryable or attempt >= max_attempts:
+                    raise
+                logger.warning(
+                    "Retrying fetch status write after transient serialization conflict | dealer_account_id=%s | fetch_status=%s | attempt=%s | error=%s",
+                    update.dealer_account_id,
+                    update.fetch_status,
+                    attempt,
+                    message,
+                )
+                time.sleep(delay_seconds)
+                delay_seconds *= 2

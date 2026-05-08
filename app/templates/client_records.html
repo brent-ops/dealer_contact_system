@@ -1,0 +1,75 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1">
+    <title>Client Records | Dealer Contact System</title>
+    <link rel="stylesheet" href="{{ url_for('static', filename='dashboard.css') }}">
+  </head>
+  <body>
+    <main class="page-shell">
+      <section class="hero">
+        <div>
+          <p class="eyebrow">Dealer Contact System</p>
+          <h1>Client Records</h1>
+          <p class="subhead">
+            Read-only view of the live prospect lead table for team review and downstream checks.
+          </p>
+        </div>
+        <div class="hero-meta">
+          <div class="meta-card">
+            <span class="meta-label">Table</span>
+            <strong>{{ data.table_name }}</strong>
+          </div>
+          <div class="meta-card">
+            <span class="meta-label">Rows</span>
+            <strong>{{ "{:,}".format(data.total_rows or 0) }}</strong>
+          </div>
+          <div class="meta-card">
+            <span class="meta-label">Generated</span>
+            <strong>{{ data.generated_at }}</strong>
+          </div>
+        </div>
+      </section>
+
+      <section class="card">
+        <div class="records-toolbar">
+          <div class="records-toolbar-copy">
+            <span class="stat-label">Page {{ data.page }} of {{ data.total_pages }}</span>
+            <p>Showing {{ "{:,}".format(data.page_size or 0) }} rows per page from the current client records table.</p>
+          </div>
+          <div class="records-toolbar-actions">
+            <a class="table-link-button table-link-button-muted" href="{{ url_for('dashboard') }}">Back to Dashboard</a>
+            {% if data.has_previous %}
+            <a class="table-link-button table-link-button-muted" href="{{ url_for('client_records', page=data.previous_page, page_size=data.page_size) }}">Previous</a>
+            {% endif %}
+            {% if data.has_next %}
+            <a class="table-link-button" href="{{ url_for('client_records', page=data.next_page, page_size=data.page_size) }}">Next</a>
+            {% endif %}
+          </div>
+        </div>
+
+        <div class="records-table-wrap">
+          <table class="records-table">
+            <thead>
+              <tr>
+                {% for column in data.columns %}
+                <th>{{ column }}</th>
+                {% endfor %}
+              </tr>
+            </thead>
+            <tbody>
+              {% for row in data.rows %}
+              <tr>
+                {% for column in data.columns %}
+                <td title="{{ row.get(column, '') }}">{{ row.get(column, '') }}</td>
+                {% endfor %}
+              </tr>
+              {% endfor %}
+            </tbody>
+          </table>
+        </div>
+      </section>
+    </main>
+  </body>
+</html>
